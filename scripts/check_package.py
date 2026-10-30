@@ -1,7 +1,7 @@
 """Check project-owned TDX sources, licenses and release dependency metadata."""
 
 import argparse
-import importlib.util
+import ast
 import re
 import tarfile
 import zipfile
@@ -67,15 +67,25 @@ def check_contents(read, names, metadata_path, version):
         assert read("README.md") == (ROOT / "README.md").read_bytes()
 
 
+def read_source_version():
+    """不执行包导入, 静态提取 tdxhub/__init__.py 中的 __version__ 赋值。"""
+
+    source = (ROOT / "tdxhub" / "__init__.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError("tdxhub/__init__.py 缺少 __version__ 字面量赋值")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel", type=Path)
     parser.add_argument("sdist", type=Path)
     args = parser.parse_args()
-    spec = importlib.util.spec_from_file_location("tdxhub", ROOT / "tdxhub" / "__init__.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    version = module.__version__
+    version = read_source_version()
     with zipfile.ZipFile(args.wheel) as archive:
         names = set(archive.namelist())
         metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))
