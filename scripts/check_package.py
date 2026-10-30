@@ -82,10 +82,16 @@ def read_source_version():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("wheel", type=Path)
-    parser.add_argument("sdist", type=Path)
+    parser.add_argument("wheel", type=Path, nargs="?", help="wheel 文件路径")
+    parser.add_argument("sdist", type=Path, nargs="?", help="sdist 文件路径")
+    parser.add_argument("--print-version", action="store_true", help="只打印包版本, 供 CI 与发布流程校验 tag")
     args = parser.parse_args()
     version = read_source_version()
+    if args.print_version:
+        print(version)
+        return
+    if args.wheel is None or args.sdist is None:
+        parser.error("需要同时提供 wheel 与 sdist 路径")
     with zipfile.ZipFile(args.wheel) as archive:
         names = set(archive.namelist())
         metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))

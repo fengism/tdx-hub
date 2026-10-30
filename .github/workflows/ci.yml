@@ -34,5 +34,18 @@ jobs:
       - run: uvx ruff check --select E9,F63,F7,F82 tdxhub tests scripts
       - run: uv run --frozen --no-sync python -m compileall -q tdxhub tests scripts
       - run: uv run --frozen --no-sync pytest
+
+  release-version:
+    name: Release version source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # publish.yml 依赖这条命令推导发布版本；它一旦失效，发布会在校验步骤静默断掉。
+      - name: Package version must be statically readable
+        run: python scripts/check_package.py --print-version
+
   wheel:
     uses: ./.github/workflows/django.yml
