@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tdxhub-sdk"
-version = "0.3.1"
 description = "通达信本地数据、行情与财务数据读取工具"
 readme = "README.md"
 requires-python = ">=3.11"
+dynamic = ["version"]
 license = "MIT"
 license-files = ["LICENSE", "AUTHORS.rst"]
 authors = [{name = "random"}]
@@ -60,6 +60,9 @@ Issues = "https://github.com/RandomLiu2025/tdx-hub/issues"
 [tool.setuptools.packages.find]
 include = ["tdxhub*"]
 exclude = ["tests*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "tdxhub.__version__" }
 
 [tool.setuptools.package-data]
 "tdxhub.utils" = ["holiday.js"]

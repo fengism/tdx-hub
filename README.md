@@ -10,11 +10,14 @@
 
 ---
 
-## 0.3.0 版本说明
+## 0.4.0 版本说明
 
-当前源码版本为 **0.3.0**，主要更新：
+当前源码版本为 **0.4.0**，主要更新：
 
-- 将 TDX 协议实现内置到 `tdxhub.tdx`，移除外部 tdxpy/Cython 依赖。
+- 将 TDX 协议实现内置到 `tdxhub.tdx`，移除外部 tdxpy/Cython 依赖（0.3.0 起）。
+- 内置 round2 新协议客户端（握手/心跳/K 线/实时快照/服务端复权），主站停用旧 K 线与旧盘口命令后自动切换；K 线默认优先新协议，可用 `TDXHUB_KLINE_PROTOCOL=legacy` 恢复旧行为。
+- 在线行情全链路支持 HTTP CONNECT / SOCKS5 代理（构造参数 `proxy=` 或 `TDXHUB_PROXY` 环境变量）。
+- 主站优选名单按实测可用性收敛（标准行情 43 台 / 扩展行情 18 台），淘汰不可达与误判节点。
 - 加强按市场/接口的主站能力探测、请求超时预算与心跳故障隔离，支持快照分批、去重与缺失诊断。
 - 加强 K 线/分笔分页完整性检查，资金流累计窗口与板块汇总不再静默返回残缺结果。
 - 修正财务摘要字段与单位、指数盘口语义、基金复权和历史股本换算，提供明确的数据质量状态。
@@ -23,6 +26,7 @@
 现有高层 API 入口保持不变，但财务字段口径和不完整数据的错误行为有变化，升级前请阅读
 [数据口径与准确性边界](#数据口径与准确性边界)与[数据完整性与异常处理](#数据完整性与异常处理)。
 底层 `tdxhub.tdx` 不承诺跨版本稳定。源码版本更新不代表已发布到 PyPI；以下说明以当前源码为准。
+版本号唯一源为 `tdxhub/__init__.py` 的 `__version__`（`pyproject.toml` 通过 `dynamic = ["version"]` 读取），`python -m tdxhub --version` 直接反映该值。
 
 ## 目录
 
@@ -220,6 +224,44 @@ with Quotes.factory("std", timeout=5) as client:
 
 默认启动探测仍为上海日 K（扩展行情为合约数量）。初始化探测、批量分页和连接池借用等待的预算边界
 见 [标准行情 API](docs/api/quote1.md#超时心跳与边界)。分页与聚合会发起多次底层请求，不能把单次请求预算当作整个高层调用的总时限。
+
+#### round2 新协议与自动降级
+
+自 2025 年起，通达信主站逐步停用旧版 K 线命令（服务器返回 2003 错误码）与旧版实时五档命令
+（返回合法但 `count=0` 的空快照）。SDK 内置了对应的新协议实现（`tdxhub.tdx.round2`，含首帧
+握手 `0x000d`、心跳 `0x0004`、K 线 `0x052d`、实时快照 `0x054c`，支持服务端复权）：
+
+* **默认直接走 round2**：`bars()` / `bars_all()` / `get_k_data()` 首次调用即使用 round2 新协议，
+  数据与旧命令口径一致（成交量/成交额单位不变），换手率与 GBBQ 复权链路无缝衔接；
+* **旧协议逃生口**：设置环境变量 `TDXHUB_KLINE_PROTOCOL=legacy` 可恢复"先试旧命令、失败再降级"的行为；
+* **手动使用 Round2Client**（也可独立调用快照与指数）：
+
+```python
+from tdxhub.tdx.round2 import Round2Client
+
+client = Round2Client(proxy='http://user:pass@host:2260')  # 代理可选
+client.connect('119.29.19.242', 7709, time_out=12)
+
+daily = client.get_bars('600000', 'day', 100, adjust='qfq')     # 日线+前复权
+idx = client.get_bars('sh000001', 'day', 1, index=True)          # 指数（含涨跌家数）
+snap = client.get_security_quotes(['600000', 'sz000001'])        # 实时快照（新命令）
+client.close()
+```
+
+#### 网络代理
+
+在线行情全链路支持经 HTTP(S) CONNECT 或 SOCKS5 代理访问主站，代理凭据仅在内存中使用：
+
+* 优先级最高：构造参数 `StdQuotes(..., proxy='http://user:pass@host:port')`；
+* 免改代码：环境变量 `TDXHUB_PROXY`（或 `TDXHUB_PROXY_URL`）；
+* 代理对标准行情、扩展行情、round2 降级连接统一生效；`python -m tdxhub bestip` 测速仅读环境变量。
+
+```python
+from tdxhub.quotes import Quotes
+
+client = Quotes.factory("std", server=('119.29.19.242', 7709),
+                        proxy='socks5://user:pass@host:port', timeout=15)
+```
 
 ---
 
@@ -670,6 +712,7 @@ Python 3.12 的独立 wheel 冒烟。网络行情测试不在默认离线门禁�
 | 模块 | 职责 |
 | --- | --- |
 | `client.py` / `extended.py` | 标准行情 `StandardClient` / 扩展行情 `ExtendedClient` |
+| `round2.py` / `proxy.py` | round2 新协议（握手/心跳/K 线/快照/服务端复权）与 HTTP CONNECT/SOCKS5 代理 |
 | `transport.py` / `heartbeat.py` | Socket 连接、流量统计、调用包装与心跳 |
 | `protocol/std` / `protocol/ext` | 请求编码、响应解析；公共收发及解压校验在 `protocol/base.py` |
 | `codec.py` / `constants.py` | 二进制字段解码、证券分类、价格系数与协议常量 |

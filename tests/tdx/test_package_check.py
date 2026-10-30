@@ -1,13 +1,10 @@
 """Release checks must detect stale modules and mismatched source/resource bytes."""
 
-import tomllib
-
 import pytest
 
 from scripts import check_package
 from scripts.check_package import ROOT, TDX, check_contents
-
-VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+from tdxhub import __version__ as VERSION
 
 
 @pytest.fixture(params=["wheel", "sdist"])

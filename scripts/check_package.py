@@ -1,9 +1,9 @@
 """Check project-owned TDX sources, licenses and release dependency metadata."""
 
 import argparse
+import importlib.util
 import re
 import tarfile
-import tomllib
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
@@ -72,7 +72,10 @@ def main():
     parser.add_argument("wheel", type=Path)
     parser.add_argument("sdist", type=Path)
     args = parser.parse_args()
-    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    spec = importlib.util.spec_from_file_location("tdxhub", ROOT / "tdxhub" / "__init__.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    version = module.__version__
     with zipfile.ZipFile(args.wheel) as archive:
         names = set(archive.namelist())
         metadata = next(name for name in names if name.endswith(".dist-info/METADATA"))

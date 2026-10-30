@@ -586,7 +586,6 @@ wheels = [
 
 [[package]]
 name = "tdxhub-sdk"
-version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
