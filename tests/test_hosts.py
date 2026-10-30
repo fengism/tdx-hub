@@ -38,22 +38,30 @@ def test_backup_extended_hosts_are_preserved():
 def test_active_quote_hosts_are_unique_and_filtered():
     endpoints = _constant_endpoints(HQ_HOSTS)
 
-    assert len(endpoints) == 8
+    assert len(endpoints) == 43
     _assert_unique(endpoints)
     assert ("117.34.114.13", 7709) in endpoints
-    assert ("117.34.114.15", 7709) in endpoints
+    assert ("117.34.114.14", 7709) in endpoints
     assert ("117.34.114.20", 7709) in endpoints
     assert ("117.34.114.27", 7709) in endpoints
+    assert ("124.71.187.122", 7709) in endpoints
+    assert ("117.34.114.30", 7709) not in endpoints
+    assert ("117.34.114.31", 7709) not in endpoints
+    assert {(host[1], int(host[2])) for host in HQ_HOSTS} <= {(host[1], int(host[2])) for host in BACKUP_HQ_HOSTS}
 
 
 def test_active_extended_hosts_are_unique_and_filtered():
     endpoints = _constant_endpoints(EX_HOSTS)
 
-    assert len(endpoints) == 17
+    assert len(endpoints) == 18
     _assert_unique(endpoints)
     assert ("112.74.214.43", 7727) in endpoints
+    assert ("49.235.119.116", 7727) in endpoints
     assert ("116.205.143.214", 7727) in endpoints  # gotdx 扩展线路
     assert ("116.205.135.205", 7727) in endpoints  # gotdx Mac 扩展线路
+    assert ("47.112.95.207", 7720) not in endpoints
+    assert ("218.75.75.18", 7720) not in endpoints
+    assert ("58.49.110.76", 7720) not in endpoints
 
 
 def test_runtime_hosts_are_deduplicated_after_tdxpy_merge():

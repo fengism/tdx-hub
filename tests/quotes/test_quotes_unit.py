@@ -68,6 +68,8 @@ class _BarsClient:
 def test_bars_normalizes_prefixed_code_and_validates_window():
     quotes = object.__new__(StdQuotes)
     quotes.client = _BarsClient()
+    quotes._round2_bars_required = False
+    quotes._round2_client = None
 
     result = quotes.bars("SH.600000", offset=1)
 

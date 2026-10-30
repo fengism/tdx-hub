@@ -1,7 +1,9 @@
 import ipaddress
 import math
+import os
 import re
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, suppress
 from copy import deepcopy
@@ -113,11 +115,14 @@ class BaseQuotes:
     verbose = False
     timeout = 15
 
-    def __init__(self, server=None, bestip: bool = False, timeout: int = None, **kwargs) -> None:
+    def __init__(self, server=None, bestip: bool = False, timeout: int = None, proxy: str = None, **kwargs) -> None:
         self._client_local = threading.local()
         self._client = None
         self.server = None
         self.bestip = None
+        self.proxy = proxy or os.environ.get('TDXHUB_PROXY') or os.environ.get('TDXHUB_PROXY_URL')
+        if self.proxy:
+            logger.info(f'proxy => {self.proxy}')
         logger.debug('config.setup()')
         config.setup()
 
@@ -259,7 +264,14 @@ def _probe_quote_endpoints(candidates, client_factory, healthcheck, timeout, max
                 if not connected:
                     raise TdxConnectionError(f'无法连接 {endpoint[0]}:{endpoint[1]}')
                 if requests is None:
-                    healthy = bool(healthcheck(client))
+                    try:
+                        healthy = bool(healthcheck(client))
+                    except (OSError, TdxConnectionError, TdxFunctionCallError, ValidationException) as exc:
+                        if not _is_protocol_error(exc):
+                            raise
+                        # 协议级错误(如服务器停用旧K线返回 2003)证明连接可用，仅能力缺失
+                        healthy = True
+                        last_error = exc
                 else:
                     for name, args in requests:
                         remaining()
@@ -366,6 +378,9 @@ class StdQuotes(BaseQuotes):
     """
     股票市场实时行情"""
 
+    _round2_client = None
+    _round2_bars_required = True
+
     @staticmethod
     def _code_market(symbol):
         """Return the numeric market and bare code expected by the TDX client."""
@@ -429,6 +444,7 @@ class StdQuotes(BaseQuotes):
         request_timeout=None,
         probe_symbols=None,
         probe_frequencies=(9,),
+        proxy=None,
         **kwargs,
     ):
         """Create a standard quote client with bounded runtime failover."""
@@ -439,7 +455,7 @@ class StdQuotes(BaseQuotes):
         if not isinstance(request_timeout, (int, float)) or not math.isfinite(request_timeout) or request_timeout <= 0:
             raise TdxhubValidationException('request_timeout 必须是大于 0 的有限数字')
         probe_requests = _standard_probe_requests(probe_symbols, probe_frequencies)
-        super().__init__(bestip=bestip, timeout=timeout, server=server, **kwargs)
+        super().__init__(bestip=bestip, timeout=timeout, server=server, proxy=proxy, **kwargs)
         unhealthy_cooldown = _validate_failover_options(max_failovers, unhealthy_cooldown, max_candidates)
         requested_server = self.server
         if requested_server:
@@ -450,7 +466,7 @@ class StdQuotes(BaseQuotes):
             raise TdxhubValidationException('没有可用的标准行情服务器配置')
 
         def probe_factory():
-            return StandardClient(heartbeat=False, auto_retry=False, raise_exception=True)
+            return StandardClient(heartbeat=False, auto_retry=False, raise_exception=True, proxy=self.proxy)
         healthy_endpoints, last_error, observations = _probe_quote_endpoints(
             candidates,
             probe_factory,
@@ -478,6 +494,7 @@ class StdQuotes(BaseQuotes):
                 heartbeat=heartbeat,
                 auto_retry=False,
                 raise_exception=True,
+                proxy=self.proxy,
                 **api_options,
             ),
             timeout=self.timeout,
@@ -498,6 +515,10 @@ class StdQuotes(BaseQuotes):
                 f'无法连接任何可用的标准行情服务器，已尝试: {healthy_endpoints}',
                 data={'servers': healthy_endpoints},
             )
+        self._round2_client = None
+        if os.environ.get('TDXHUB_KLINE_PROTOCOL', '').lower() in ('legacy', 'classic'):
+            logger.info('TDXHUB_KLINE_PROTOCOL=legacy: K 线优先尝试经典命令(0x052d 旧格式)')
+            self._round2_bars_required = False
 
         self._stock_info_client_pool = FailoverClientPool(self.client, max_size=4)
         self._capital_flow_cache = {}
@@ -592,7 +613,18 @@ class StdQuotes(BaseQuotes):
         if start < 0 or offset <= 0:
             raise TdxhubValidationException('start 必须大于等于 0，offset 必须大于 0')
 
-        raw = self.client.get_security_bars(int(frequency), market, code, start, offset)
+        try:
+            if self._round2_bars_required:
+                raw = self._round2_klines(int(frequency), market, code, start, offset)
+            else:
+                raw = self.client.get_security_bars(int(frequency), market, code, start, offset)
+                if raw is None:
+                    # 2003(旧K线命令已停用)或网络重试耗尽都会表现为 None; 降级 round2
+                    logger.info('经典 get_security_bars 无数据, 自动切换 round2 新协议: %s', code)
+                    self._round2_bars_required = True
+                    raw = self._round2_klines(int(frequency), market, code, start, offset)
+        except (TdxConnectionError, OSError) as exc:
+            raise TdxhubConnectionError('行情分页请求失败，不能将失败响应视为数据结束') from exc
         if with_turnover and actions is None and raw is not None and len(raw) > 0:
             actions = self.xdxr(symbol)
         if options.get("xdxr") is None and actions is not None:
@@ -605,6 +637,53 @@ class StdQuotes(BaseQuotes):
         from tdxhub.gbbq import enrich_turnover
 
         return enrich_turnover(result, actions, code=code)
+
+    def _round2_klines(self, frequency, market, code, start, offset):
+        """服务器停用旧 K 线命令(2003)时, 用 round2(0x052d) 新协议降级取数。
+
+        复用当前 failover 已选中的端点; 产出与经典 ``get_security_bars``
+        完全同构的行列表(open/close/high/low/vol/amount/.../datetime)。
+        """
+
+        from tdxhub.tdx.round2 import Round2Client, is_convertible
+
+        client = self._round2_client
+        endpoint = getattr(self.client, 'endpoint', None)
+        if endpoint:
+            target = (str(endpoint[0]), int(endpoint[1]))
+        elif getattr(self, 'server', None):
+            target = (str(self.server[0]), int(self.server[1]))
+        else:
+            raise TdxConnectionError('无可用行情端点')
+        if client is None:
+            client = Round2Client(proxy=getattr(self, 'proxy', None))
+            self._round2_client = client
+        stale = client.client is None or client.ip != target[0] or client.port != target[1]
+        if stale:
+            client.disconnect()
+            client.connect(target[0], target[1], time_out=max(self.timeout, 10))
+        convertible = is_convertible(market, code)
+        frame = client.get_security_bars(int(frequency), market, code, start, int(offset))
+        rows = []
+        for _, row in frame.iterrows():
+            moment = row['time']
+            hour = int(getattr(moment, 'hour', 15))
+            minute = int(getattr(moment, 'minute', 0))
+            rows.append(OrderedDict([
+                ('open', float(row['open'])),
+                ('close', float(row['close'])),
+                ('high', float(row['high'])),
+                ('low', float(row['low'])),
+                ('vol', float(row['vol']) * 100 if not convertible else float(row['vol'])),
+                ('amount', float(row['amount'])),
+                ('year', int(moment.year)),
+                ('month', int(moment.month)),
+                ('day', int(moment.day)),
+                ('hour', hour),
+                ('minute', minute),
+                ('datetime', f'{moment.year:04d}-{moment.month:02d}-{moment.day:02d} {hour:02d}:{minute:02d}'),
+            ]))
+        return rows
 
     def stock_count(self, market=MARKET_SH, security_type=None, *, raw=False):
         """Return a market directory count, optionally filtered by security type."""
@@ -1166,9 +1245,8 @@ class StdQuotes(BaseQuotes):
         """Return latest-day or ranged minute bars with a 09:30 auction bar."""
         from zoneinfo import ZoneInfo
 
-        from tdxhub.minute import build_minute_241, minute_241_dates, select_latest_minute_bars
-
         from tdxhub.data_units import trade_volume_multiplier
+        from tdxhub.minute import build_minute_241, minute_241_dates, select_latest_minute_bars
 
         market, code = self._code_market(symbol)
         volume_multiplier = trade_volume_multiplier(market, code)
@@ -1981,6 +2059,7 @@ class ExtQuotes(BaseQuotes):
         unhealthy_cooldown=60.0,
         max_candidates=5,
         request_timeout=None,
+        proxy=None,
         **kwargs,
     ):
         """Create an extended-market quote client with bounded failover."""
@@ -1990,7 +2069,7 @@ class ExtQuotes(BaseQuotes):
             request_timeout = 15
         if not isinstance(request_timeout, (int, float)) or not math.isfinite(request_timeout) or request_timeout <= 0:
             raise TdxhubValidationException('request_timeout 必须是大于 0 的有限数字')
-        super().__init__(bestip=bestip, timeout=timeout, server=server, **kwargs)
+        super().__init__(bestip=bestip, timeout=timeout, server=server, proxy=proxy, **kwargs)
         unhealthy_cooldown = _validate_failover_options(max_failovers, unhealthy_cooldown, max_candidates)
         requested_server = self.server
         if requested_server:
@@ -2001,7 +2080,7 @@ class ExtQuotes(BaseQuotes):
             raise TdxhubValidationException('没有可用的扩展行情服务器配置')
 
         def probe_factory():
-            return ExtendedClient(heartbeat=False, auto_retry=False, raise_exception=True)
+            return ExtendedClient(heartbeat=False, auto_retry=False, raise_exception=True, proxy=self.proxy)
 
         healthy_endpoints, last_error, observations = _probe_quote_endpoints(
             candidates,
@@ -2029,6 +2108,7 @@ class ExtQuotes(BaseQuotes):
                 heartbeat=heartbeat,
                 auto_retry=False,
                 raise_exception=True,
+                proxy=self.proxy,
                 **api_options,
             ),
             timeout=self.timeout,

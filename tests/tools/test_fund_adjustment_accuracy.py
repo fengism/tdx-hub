@@ -94,6 +94,8 @@ def test_adjustment_never_changes_actual_turnover(method, entry, monkeypatch):
     else:
         q = object.__new__(StdQuotes)
         q.client = SimpleNamespace(get_security_bars=lambda *a: raw.copy(), close=lambda: None)
+        q._round2_bars_required = False
+        q._round2_client = None
         read = getattr(q, entry)
     plain = read('600000', turnover=True, xdxr=actions)
     adjusted = read('600000', turnover=True, xdxr=actions, adjust=method)

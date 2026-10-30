@@ -13,6 +13,9 @@ from tdxhub.quotes import StdQuotes
 def quote():
     result = object.__new__(StdQuotes)
     result.client = SimpleNamespace(close=lambda: None)
+    # K 线相关用例按经典 wire 语义编写, 显式关闭 round2 默认优先
+    result._round2_bars_required = False
+    result._round2_client = None
     return result
 
 

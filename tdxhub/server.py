@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +59,16 @@ def connect(proxy: dict) -> dict:
     return result
 
 
+def _env_proxy() -> str | None:
+    """Return the currently configured proxy from the environment, if any."""
+
+    for name in ("TDXHUB_PROXY", "TDXHUB_PROXY_URL"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def connect2(proxy: dict, index: str = "HQ") -> dict:
     """Validate a host using the corresponding TDX protocol."""
 
@@ -65,14 +76,11 @@ def connect2(proxy: dict, index: str = "HQ") -> dict:
         return connect(proxy)
 
     result = dict(proxy, time=None)
-    api = StandardClient() if index == "HQ" else ExtendedClient()
+    api = StandardClient(proxy=_env_proxy()) if index == "HQ" else ExtendedClient(proxy=_env_proxy())
     try:
         with api.connect(result["addr"], int(result["port"]), time_out=0.7):
             started = time.perf_counter()
-            if index == "HQ":
-                healthy = api.get_security_bars(9, 1, "600000", 0, 1)
-            else:
-                healthy = api.get_instrument_count()
+            healthy = api.get_security_count(1) > 0 if index == "HQ" else api.get_instrument_count()
             if healthy:
                 result["time"] = (time.perf_counter() - started) * 1000
     except (OSError, RuntimeError, TypeError, ValueError, TdxConnectionError, TdxFunctionCallError) as exc:

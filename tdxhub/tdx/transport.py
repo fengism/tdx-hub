@@ -11,6 +11,7 @@ from tdxhub.tdx.errors import TdxConnectionError, TdxFunctionCallError, Validati
 from tdxhub.tdx.heartbeat import HeartBeatThread
 from tdxhub.tdx.logger import logger
 from tdxhub.tdx.protocol.raw_parser import RawParser
+from tdxhub.tdx.proxy import apply_proxy, parse_proxy, proxy_description
 
 DEFAULT_HEARTBEAT_INTERVAL = 10.0
 
@@ -109,13 +110,14 @@ class TrafficStatSocket(socket.socket):
 
 
 class BaseSocketClient:
-    def __init__(self, multithread=False, heartbeat=False, auto_retry=False, raise_exception=False):
+    def __init__(self, multithread=False, heartbeat=False, auto_retry=False, raise_exception=False, proxy=None):
         """
         构造函数
         :param multithread: 是否多线程
         :param heartbeat: 是否心跳
         :param auto_retry: 是否自动回复
         :param raise_exception: 是否抛出异常
+        :param proxy: 代理地址，形如 http://user:pass@host:port 或 socks5://user:pass@host:port
         """
 
         self.need_setup = True
@@ -147,6 +149,9 @@ class BaseSocketClient:
         # 是否在函数调用出错的时候抛出异常
         self.raise_exception = raise_exception
 
+        # 代理配置（已解析为 dict），None 表示直连
+        self.proxy = parse_proxy(proxy)
+
     def connect(self, ip: str = None, port: int = 7709, time_out=CONNECT_TIMEOUT, bind_port=None, bind_ip="0.0.0.0"):
         """
         连接服务器
@@ -173,7 +178,11 @@ class BaseSocketClient:
 
             self.ip, self.port = ip, port
             with socket_budget(self.client):
-                self.client.connect((ip, port))
+                if self.proxy:
+                    logger.debug(f"connecting to server: {ip} on port: {port} via proxy: {proxy_description(self.proxy)}")
+                    apply_proxy(self.client, ip, port, self.proxy, time_out)
+                else:
+                    self.client.connect((ip, port))
         except TimeoutError as e:
             logger.debug("connection expired")
             self.client.close()
