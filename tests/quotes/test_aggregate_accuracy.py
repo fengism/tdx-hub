@@ -29,7 +29,7 @@ def flow(net=100.0, *, trade_count=2):
 @pytest.mark.parametrize('method,wire,size,args', [
     ('bars_all', 'get_security_bars', 800, {'symbol': '600000'}),
     ('index_all', 'get_index_bars', 800, {'symbol': 'sh000001'}),
-    ('transaction_all', 'get_transaction_data', 1800, {'symbol': '600000'}),
+    ('transaction_all', 'get_transaction_data', 2000, {'symbol': '600000'}),
     ('transactions_all', 'get_history_transaction_data', 2000, {'symbol': '600000', 'date': '20260918'}),
     ('get_k_data', 'get_security_bars', 800,
      {'code': '600000', 'start_date': '20000101', 'end_date': '20260919'}),
