@@ -1464,7 +1464,7 @@ class StdQuotes(BaseQuotes):
                 offset=size,
                 **kwargs,
             ),
-            1800,
+            2000,
         )
 
     def transactions_all(self, symbol='', date='20170209', **kwargs):
