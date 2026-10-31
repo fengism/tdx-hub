@@ -597,14 +597,15 @@ class StdQuotes(BaseQuotes):
         return finish([rows_by_symbol[key] for key in requested if key in rows_by_symbol],
                       "missing" if info["missing"] else "ok", requested)
 
-    def bars(self, symbol='000001', frequency=9, start=0, offset=800, **kwargs):
+    def bars(self, symbol='000001', frequency=9, start=0, offset=800, index=None, **kwargs):
         """
         获取实时日K线数据
 
-        :param symbol: 股票代码
+        :param symbol: 股票代码; 指数(如 ``sh000001``/``399001``)自动按指数 K 线解析
         :param frequency: 数据频次
         :param start: 开始位置
         :param offset: 每次获取条数
+        :param index: 显式指数/个股开关; 未指定时按代码自动识别
         :return: pd.dataFrame or None
         """
         frequency = get_frequency(frequency)
@@ -615,7 +616,10 @@ class StdQuotes(BaseQuotes):
             raise TdxhubValidationException("换手率仅支持股票日 K")
 
         actions = gbbq if gbbq is not None else options.get("xdxr")
+        from tdxhub.tdx.round2 import is_index_code
+
         market, code = self._code_market(symbol)
+        index_flag = bool(index) if index is not None else is_index_code(market, code)
         try:
             offset = min(int(offset), 800)
             start = int(start)
@@ -625,15 +629,15 @@ class StdQuotes(BaseQuotes):
             raise TdxhubValidationException('start 必须大于等于 0，offset 必须大于 0')
 
         try:
-            if self._round2_bars_required:
-                raw = self._round2_klines(int(frequency), market, code, start, offset)
+            if index_flag or self._round2_bars_required:
+                raw = self._round2_klines(int(frequency), market, code, start, offset, index=index_flag)
             else:
                 raw = self.client.get_security_bars(int(frequency), market, code, start, offset)
                 if raw is None:
                     # 2003(旧K线命令已停用)或网络重试耗尽都会表现为 None; 降级 round2
                     logger.info('经典 get_security_bars 无数据, 自动切换 round2 新协议: %s', code)
                     self._round2_bars_required = True
-                    raw = self._round2_klines(int(frequency), market, code, start, offset)
+                    raw = self._round2_klines(int(frequency), market, code, start, offset, index=index_flag)
         except (TdxConnectionError, OSError) as exc:
             raise TdxhubConnectionError('行情分页请求失败，不能将失败响应视为数据结束') from exc
         if with_turnover and actions is None and raw is not None and len(raw) > 0:
