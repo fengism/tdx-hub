@@ -24,6 +24,9 @@ def test_quote_mixed_stock_and_index_only_nulls_index_book():
     ]
     q = object.__new__(StdQuotes)
     q.client = SimpleNamespace(get_security_quotes=lambda symbols: rows)
+    # legacy 报文语义用例: 显式声明 classic 快照, 不受 round2 默认影响
+    q._round2_quotes_required = False
+    q._round2_client = None
     response = http(q).get("/quote", params={"codes": "sh000001,sz000001"})
     assert response.status_code == 200
     index, stock = response.json()["data"]
