@@ -24,8 +24,8 @@ class FakeHqApi:
     def close(self):
         self.client = None
 
-    def get_security_bars(self, *args):
-        return [{"close": 1.0}]
+    def get_security_quotes(self, stocks):
+        return [{"price": 1.0}]
 
 
 def test_std_client_uses_default_when_bestip_is_empty(monkeypatch):
@@ -80,10 +80,12 @@ def test_bars_normalizes_prefixed_code_and_validates_window():
 
 
 def test_index_routing_prefixes_and_market_override():
-    from tdxhub.consts import MARKET_BJ, MARKET_SH, MARKET_SZ
+    from tdxhub.consts import MARKET_BJ, MARKET_SZ
 
     quotes = object.__new__(StdQuotes)
     quotes.client = _BarsClient()
+    quotes._round2_bars_required = False
+    quotes._round2_client = None
 
     # 1. Automatic routing by code prefix
     quotes.index("000001", offset=1)

@@ -118,15 +118,9 @@ def test_target_probes_separate_markets_interfaces_and_keep_empty_unknown(monkey
         def __init__(self, **kwargs):
             super().__init__({}, [])
 
-        def get_security_bars(self, category, market, code, start, count):
-            calls.append((self.endpoint, "bars", market, category))
-            if self.endpoint == A and market == 2:
-                raise ProtocolError("BJ bars malformed")
-            return [{"close": 1}]
-
         def get_security_quotes(self, stocks):
             market, _ = stocks[0]
-            calls.append((self.endpoint, "quotes", market, None))
+            calls.append((self.endpoint, "quotes", market))
             return [] if market == 2 else [{"price": 1}]
 
     values = {"SERVER.HQ": [("a", *A), ("b", *B)]}
@@ -136,12 +130,14 @@ def test_target_probes_separate_markets_interfaces_and_keep_empty_unknown(monkey
     monkeypatch.setattr("tdxhub.quotes.StandardClient", Api)
     with StdQuotes(probe_symbols=["sh600000", "bj920001"], probe_frequencies=[9, 8]) as quotes:
         pool = quotes.client.endpoint_pool
-        assert pool.capability_status(A, ("get_security_bars", (2,), 8)) == "failed"
-        assert pool.capability_status(A, ("get_security_bars", (1,), 9)) == "supported"
+        # 探测不再使用已停用的旧 K 线命令: 未探测能力保持 unknown, 不限制 failover
+        assert pool.capability_status(A, ("get_security_bars", (2,), 8)) == "unknown"
+        assert pool.capability_status(A, ("get_security_bars", (1,), 9)) == "unknown"
         assert pool.capability_status(A, ("get_security_quotes", (2,), None)) == "unknown"
-        assert pool.available(("get_security_bars", (2,), 8)) == [B]
-        assert set(pool.available(("get_security_quotes", (2,), None))) == {A, B}
-    assert len(calls) == 12
+        assert pool.capability_status(A, ("get_security_quotes", (1,), None)) == "supported"
+        assert set(pool.available(("get_security_bars", (2,), 8))) == {A, B}
+        assert set(pool.available(("get_security_quotes", (1,), None))) == {A, B}
+    assert len(calls) == 4
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
@@ -264,13 +260,8 @@ def test_probe_rejects_transport_failure_or_no_successful_response(transport_fai
     class Api(ScriptedApi):
         def get_security_quotes(self, stocks):
             if transport_failure:
-                return [{"price": 1}]
+                raise ConnectionError("offline probe")
             raise ProtocolError("malformed quotes")
-
-        def get_security_bars(self, *args):
-            if transport_failure:
-                raise ConnectionError("offline after successful quotes")
-            raise ProtocolError("malformed bars")
 
     def factory():
         api = Api({}, [])

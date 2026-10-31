@@ -2,8 +2,8 @@ from collections import deque
 
 import pytest
 
-from tdxhub.tdx.errors import TdxFunctionCallError, ValidationException
 from tdxhub.quotes import StdQuotes
+from tdxhub.tdx.errors import TdxFunctionCallError, ValidationException
 
 
 class BatchApi:
@@ -24,6 +24,8 @@ class BatchApi:
 def quotes_with(api):
     quotes = object.__new__(StdQuotes)
     quotes.client = api
+    quotes._round2_quotes_required = False
+    quotes._round2_client = None
     return quotes
 
 

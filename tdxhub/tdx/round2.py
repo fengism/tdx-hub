@@ -641,21 +641,26 @@ class Round2Client:
     def get_security_quotes(self, codes):
         """实时快照(``0x054c``)。
 
-        :param codes: ``['600000', ('000001', 0), ('sh600000', 1)]`` —
-            六位代码可带 ``sh/sz/bj`` 前缀或以 ``(code, market)`` 元组给出
+        :param codes: ``['600000', ('000001', 0), (1, '600000')]`` —
+            六位代码可带 ``sh/sz/bj`` 前缀; 元组既支持 ``(code, market)``,
+            也支持经典顺序 ``(market, code)``(int 在前)
         :returns: DataFrame(market/code/price/pre_close/open/high/low/vol/cur_vol/amount/
             inside/outer/open_amount/bid1/ask1/bid_vol1/ask_vol1)
         """
 
         import pandas as pd
 
+        suffix_market = {'sh': 1, 'sz': 0, 'bj': 2}
         normalized = []
         for item in codes:
             if isinstance(item, (tuple, list)):
-                if len(item) == 2 and isinstance(item[1], int):
-                    normalized.append((item[1], str(item[0])))
-                elif len(item) == 2 and str(item[1]).lower() in ('sh', 'sz', 'bj'):
-                    normalized.append(({'sh': 1, 'sz': 0, 'bj': 2}[str(item[1]).lower()], str(item[0])))
+                a, b = (item[0], item[1]) if len(item) == 2 else (None, None)
+                if isinstance(b, int) and not isinstance(a, int):
+                    normalized.append((int(b), str(a)))
+                elif isinstance(a, int) and isinstance(b, str):
+                    normalized.append((int(a), str(b)))
+                elif isinstance(b, str) and str(b).lower() in suffix_market:
+                    normalized.append((suffix_market[str(b).lower()], str(a)))
                 else:
                     normalized.append((0, str(item[0])))
                 continue

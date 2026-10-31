@@ -193,6 +193,8 @@ def test_public_quotes_decodes_beijing_and_mixed_market_snapshots(symbol, beijin
     body_key = "body_hex" if mixed else "beijing_body_hex"
     quotes = object.__new__(StdQuotes)
     quotes.client = quote_api(bytes.fromhex(beijing_quotes_wire[body_key]))
+    quotes._round2_quotes_required = False
+    quotes._round2_client = None
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         result = quotes.quotes(symbol)

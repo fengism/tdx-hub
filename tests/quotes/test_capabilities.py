@@ -1,5 +1,5 @@
-from tdxhub.tdx.errors import ProtocolError
 from tdxhub.failover import EndpointPool
+from tdxhub.tdx.errors import ProtocolError
 from tests.quotes.test_failover import A, B, C, FakeClock, client_for
 
 BJ_MINUTE = ("get_security_bars", (2,), 8)

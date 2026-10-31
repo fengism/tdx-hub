@@ -329,6 +329,10 @@ def _probe_quote_endpoints(candidates, client_factory, healthcheck, timeout, max
 
 
 def _standard_probe_requests(symbols, frequencies):
+    """构造初始化探测请求: 按市场用 quotes 探测(旧 K 线命令已停用, 不再探测 bars)。
+
+    ``frequencies`` 仅保留兼容校验, 不再驱动额外探测请求。
+    """
     if symbols is None:
         return None
     if not isinstance(symbols, (list, tuple)) or not symbols:
@@ -342,11 +346,7 @@ def _standard_probe_requests(symbols, frequencies):
         raise TdxhubValidationException('probe_symbols 中的证券代码必须是六位数字')
     if len({market for market, _ in samples}) != len(samples):
         raise TdxhubValidationException('probe_symbols 每个市场只需提供一个样本')
-    requests = []
-    for market, code in samples:
-        requests.append(('get_security_quotes', ([(market, code)],)))
-        requests.extend(('get_security_bars', (category, market, code, 0, 1)) for category in dict.fromkeys(frequencies))
-    return requests
+    return [('get_security_quotes', ([(market, code)],)) for market, code in samples]
 
 
 def _legacy_retry(**options):
@@ -380,6 +380,7 @@ class StdQuotes(BaseQuotes):
 
     _round2_client = None
     _round2_bars_required = True
+    _round2_quotes_required = True
 
     @staticmethod
     def _code_market(symbol):
@@ -454,7 +455,8 @@ class StdQuotes(BaseQuotes):
             request_timeout = 15
         if not isinstance(request_timeout, (int, float)) or not math.isfinite(request_timeout) or request_timeout <= 0:
             raise TdxhubValidationException('request_timeout 必须是大于 0 的有限数字')
-        probe_requests = _standard_probe_requests(probe_symbols, probe_frequencies)
+        probe_symbol_spec = probe_symbols if probe_symbols is not None else ['sh600000']
+        probe_requests = _standard_probe_requests(probe_symbol_spec, probe_frequencies)
         super().__init__(bestip=bestip, timeout=timeout, server=server, proxy=proxy, **kwargs)
         unhealthy_cooldown = _validate_failover_options(max_failovers, unhealthy_cooldown, max_candidates)
         requested_server = self.server
@@ -470,7 +472,7 @@ class StdQuotes(BaseQuotes):
         healthy_endpoints, last_error, observations = _probe_quote_endpoints(
             candidates,
             probe_factory,
-            lambda client: client.get_security_bars(9, MARKET_SH, '600000', 0, 1),
+            lambda client: client.get_security_count(1) > 0,
             self.timeout,
             max_candidates,
             requests=probe_requests,
@@ -517,8 +519,9 @@ class StdQuotes(BaseQuotes):
             )
         self._round2_client = None
         if os.environ.get('TDXHUB_KLINE_PROTOCOL', '').lower() in ('legacy', 'classic'):
-            logger.info('TDXHUB_KLINE_PROTOCOL=legacy: K 线优先尝试经典命令(0x052d 旧格式)')
+            logger.info('TDXHUB_KLINE_PROTOCOL=legacy: K 线与快照优先尝试经典命令(服务器已停用, 失败自动降级)')
             self._round2_bars_required = False
+            self._round2_quotes_required = False
 
         self._stock_info_client_pool = FailoverClientPool(self.client, max_size=4)
         self._capital_flow_cache = {}
@@ -568,7 +571,15 @@ class StdQuotes(BaseQuotes):
             batch = requested[start:start + batch_size]
             info["batches"] += 1
             try:
-                rows = self.client.get_security_quotes([list(item) for item in batch])
+                if self._round2_quotes_required:
+                    rows = self._round2_quotes_rows(batch)
+                else:
+                    rows = self.client.get_security_quotes([list(item) for item in batch])
+                    if rows is not None and len(rows) == 0:
+                        # classic 0x10C 软弃用: 返回合法但 count=0 的空快照 → round2 兜底
+                        logger.info('经典 get_security_quotes 返回空(旧命令停用), 自动切换 round2 快照: %s', batch)
+                        self._round2_quotes_required = True
+                        rows = self._round2_quotes_rows(batch)
             except ValidationException as exc:
                 info["error"] = str(exc)
                 return finish(None, "invalid_input")
@@ -638,16 +649,11 @@ class StdQuotes(BaseQuotes):
 
         return enrich_turnover(result, actions, code=code)
 
-    def _round2_klines(self, frequency, market, code, start, offset):
-        """服务器停用旧 K 线命令(2003)时, 用 round2(0x052d) 新协议降级取数。
+    def _round2_connected(self):
+        """获取(或建立)与当前 failover 端点对齐的 round2 连接."""
 
-        复用当前 failover 已选中的端点; 产出与经典 ``get_security_bars``
-        完全同构的行列表(open/close/high/low/vol/amount/.../datetime)。
-        """
+        from tdxhub.tdx.round2 import Round2Client
 
-        from tdxhub.tdx.round2 import Round2Client, is_convertible
-
-        client = self._round2_client
         endpoint = getattr(self.client, 'endpoint', None)
         if endpoint:
             target = (str(endpoint[0]), int(endpoint[1]))
@@ -655,6 +661,7 @@ class StdQuotes(BaseQuotes):
             target = (str(self.server[0]), int(self.server[1]))
         else:
             raise TdxConnectionError('无可用行情端点')
+        client = self._round2_client
         if client is None:
             client = Round2Client(proxy=getattr(self, 'proxy', None))
             self._round2_client = client
@@ -662,14 +669,88 @@ class StdQuotes(BaseQuotes):
         if stale:
             client.disconnect()
             client.connect(target[0], target[1], time_out=max(self.timeout, 10))
+        return client
+
+    def _round2_quotes_rows(self, batch):
+        """classic 0x10C 软弃用(返回合法空快照)时, 用 round2 快照(0x054c)兜底取盘口.
+
+        行结构对齐经典 ``get_security_quotes``: 缺失的五档/衍生列以旧 wire 语义
+        的空位(0/None)补齐, 汇总与一档盘口为真实数据。
+        """
+
+        client = self._round2_connected()
+        frame = client.get_security_quotes([(int(market), str(code)) for market, code in batch])
+        rows = []
+        for _, row in frame.iterrows():
+            rows.append(OrderedDict([
+                ('market', int(row['market'])),
+                ('code', str(row['code'])),
+                ('active1', int(row['active1'])),
+                ('price', float(row['price'])),
+                ('last_close', float(row['pre_close'])),
+                ('open', float(row['open'])),
+                ('high', float(row['high'])),
+                ('low', float(row['low'])),
+                ('servertime', None),
+                ('reversed_bytes0', 0),
+                ('reversed_bytes1', 0),
+                ('vol', int(row['vol'])),
+                ('cur_vol', int(row['cur_vol'])),
+                ('amount', float(row['amount'])),
+                ('s_vol', int(row['inside'])),
+                ('b_vol', int(row['outer'])),
+                ('reversed_bytes2', 0),
+                ('reversed_bytes3', 0),
+                ('bid1', float(row['bid1'])),
+                ('ask1', float(row['ask1'])),
+                ('bid_vol1', int(row['bid_vol1'])),
+                ('ask_vol1', int(row['ask_vol1'])),
+                ('bid2', 0.0),
+                ('ask2', 0.0),
+                ('bid_vol2', 0),
+                ('ask_vol2', 0),
+                ('bid3', 0.0),
+                ('ask3', 0.0),
+                ('bid_vol3', 0),
+                ('ask_vol3', 0),
+                ('bid4', 0.0),
+                ('ask4', 0.0),
+                ('bid_vol4', 0),
+                ('ask_vol4', 0),
+                ('bid5', 0.0),
+                ('ask5', 0.0),
+                ('bid_vol5', 0),
+                ('ask_vol5', 0),
+                ('reversed_bytes4', 0),
+                ('reversed_bytes5', 0),
+                ('reversed_bytes6', 0),
+                ('reversed_bytes7', 0),
+                ('reversed_bytes8', 0),
+                ('reversed_bytes9', 0),
+                ('active2', 0),
+            ]))
+        return rows
+
+    def _round2_klines(self, frequency, market, code, start, offset, index=False):
+        """服务器停用旧 K 线命令(2003)时, 用 round2(0x052d) 新协议降级取数。
+
+        复用当前 failover 已选中的端点; 产出与经典 ``get_security_bars`` /
+        ``get_index_bars`` 完全同构的行列表。
+        """
+
+        from tdxhub.tdx.round2 import is_convertible
+
+        index_flag = bool(index)
+
+        client = self._round2_connected()
         convertible = is_convertible(market, code)
-        frame = client.get_security_bars(int(frequency), market, code, start, int(offset))
+        frame = client.get_security_bars(int(frequency), market, code, start, int(offset), index=index_flag)
         rows = []
         for _, row in frame.iterrows():
             moment = row['time']
             hour = int(getattr(moment, 'hour', 15))
             minute = int(getattr(moment, 'minute', 0))
-            rows.append(OrderedDict([
+            entry = OrderedDict([
                 ('open', float(row['open'])),
                 ('close', float(row['close'])),
                 ('high', float(row['high'])),
@@ -682,7 +763,11 @@ class StdQuotes(BaseQuotes):
                 ('hour', hour),
                 ('minute', minute),
                 ('datetime', f'{moment.year:04d}-{moment.month:02d}-{moment.day:02d} {hour:02d}:{minute:02d}'),
-            ]))
+            ])
+            if index_flag and 'up_count' in frame.columns:
+                entry['up_count'] = int(row['up_count'])
+                entry['down_count'] = int(row['down_count'])
+            rows.append(entry)
         return rows
 
     def stock_count(self, market=MARKET_SH, security_type=None, *, raw=False):
@@ -1130,9 +1215,19 @@ class StdQuotes(BaseQuotes):
             raise TdxhubValidationException('start 必须大于等于 0，offset 必须大于 0')
 
         market, code = self._index_code_market(symbol, market=market_arg)
-        result = self.client.get_index_bars(int(frequency), int(market), str(code), int(start), int(offset))
+        if self._round2_bars_required:
+            raw = self._round2_klines(int(frequency), int(market), str(code), int(start), int(offset), index=True)
+        else:
+            raw = self.client.get_index_bars(int(frequency), int(market), str(code), int(start), int(offset))
+            if raw is None or (isinstance(raw, list) and len(raw) == 0):
+                logger.info('经典 get_index_bars 无数据(旧命令停用), 自动切换 round2: %s', code)
+                self._round2_bars_required = True
+                try:
+                    raw = self._round2_klines(int(frequency), int(market), str(code), int(start), int(offset), index=True)
+                except (TdxConnectionError, OSError) as exc:
+                    raise TdxhubConnectionError('行情分页请求失败，不能将失败响应视为数据结束') from exc
 
-        return _page_to_data(result, symbol=code, client=self, **options)
+        return _page_to_data(raw, symbol=code, client=self, **options)
 
     @staticmethod
     def _parse_since(since):
@@ -1985,7 +2080,7 @@ class StdQuotes(BaseQuotes):
         # newest page and stop only after observing the requested start date.
         market, code = self._code_market(code)
         data = self._collect_pages(
-            lambda offset, size: self.client.get_security_bars(9, market, code, offset, size),
+            lambda offset, size: self.bars(symbol=code, frequency=9, start=offset, offset=size),
             800,
             since=start.strftime('%Y%m%d'),
         )

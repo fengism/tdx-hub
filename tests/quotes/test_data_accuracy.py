@@ -24,6 +24,8 @@ def test_get_k_data_weekend_does_not_skip_friday(monkeypatch):
 
     q = object.__new__(StdQuotes)
     q.client = SimpleNamespace(get_security_bars=load, to_df=pd.DataFrame)
+    q._round2_bars_required = False
+    q._round2_client = None
     result = q.get_k_data("sh600519", "20260914", "20260919")
     assert list(result.index) == [f"2026-09-{day}" for day in range(14, 19)]
     assert calls == [0]
@@ -40,6 +42,8 @@ def test_get_k_data_paginates_until_real_start_date():
 
     q = object.__new__(StdQuotes)
     q.client = SimpleNamespace(get_security_bars=load, to_df=pd.DataFrame)
+    q._round2_bars_required = False
+    q._round2_client = None
     result = q.get_k_data("sh600519", dates[1], dates[-1])
     assert len(result) == 1601
     assert calls == [0, 800, 1600]

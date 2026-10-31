@@ -59,6 +59,8 @@ def test_snapshot_prices_are_decoded_once(market, code, coefficient, public):
     if public:
         quotes = object.__new__(StdQuotes)
         quotes.client = client
+        quotes._round2_quotes_required = False
+        quotes._round2_client = None
         row = quotes.quotes(code).iloc[0]
         assert "active1" not in row
         assert "reversed_bytes0" not in row
@@ -112,6 +114,8 @@ def test_public_index_quote_does_not_expose_repurposed_order_book(market, code):
 
     q = object.__new__(StdQuotes)
     q.client = quote_api(snapshot_body(market, code))
+    q._round2_quotes_required = False
+    q._round2_client = None
     row = q.quotes({0: 'sz', 1: 'sh', 2: 'bj'}[market] + code).iloc[0]
     assert row['price'] == pytest.approx(16.39)
     for level in range(1, 6):
